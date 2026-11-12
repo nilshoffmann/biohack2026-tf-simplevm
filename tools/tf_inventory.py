@@ -189,7 +189,10 @@ _JINJA = re.compile(r"\{[{%#]")
 
 
 def valid_ip(value: Any) -> bool:
-    if not isinstance(value, str):
+    """An IPv4 or IPv6 address without a scope ID: ipaddress accepts any
+    characters after '%' (e.g. 'fe80::1%-oProxyCommand=…'), and VM and gateway
+    addresses never need one."""
+    if not isinstance(value, str) or "%" in value:
         return False
     try:
         ipaddress.ip_address(value)
@@ -208,8 +211,12 @@ def valid_user(value: Any) -> bool:
 
 
 def defuse(text: str) -> str:
-    """Break Jinja delimiters in text that is only informational (warnings)."""
-    return _JINJA.sub(lambda m: m.group(0)[0] + " " + m.group(0)[1], text)
+    """Break Jinja delimiters in text that is only informational (warnings).
+
+    Every '{' gets a space after it, so no '{' can be directly followed by
+    '{', '%' or '#'. Replacing matches one at a time is not enough: '{{{'
+    would leave '{ {{'."""
+    return text.replace("{", "{ ")
 
 
 def drop_templates(value: Any, path: str, warnings: list[str]) -> Any:

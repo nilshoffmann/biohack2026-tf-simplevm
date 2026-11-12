@@ -215,7 +215,25 @@ class UntrustedInputTest(unittest.TestCase):
             self.assertFalse(inv.valid_user(bad), bad)
 
     def test_defuse(self):
-        self.assertEqual(inv.defuse("a {{ b }} {% c %} {# d #}"), "a { { b }} { % c %} { # d #}")
+        self.assertEqual(inv.defuse("a {{ b }} {% c %} {# d #}"), "a { {  b }} { % c %} { # d #}")
+        for s in ("{{{ x }}", "{{% x %}", "{{# x #}", "{%{ x", "{{{{{{", "{" * 7 + "%#"):
+            self.assertIsNone(inv._JINJA.search(inv.defuse(s)), s)
+
+    def test_nested_delimiters_in_warnings_are_defused(self):
+        mode = {"name": "SSH", "copy_field": "ssh ubuntu@gw.example -p 70000"}
+        r = self.build(evil_api(modes=[mode], vm_state="{{{ lookup('pipe', 'id') }}"))
+        self.assertTrue(any("vm_state" in w for w in r["warnings"]))
+        self.assert_no_templates(r)
+
+    def test_ipv6_scope_ids_are_rejected(self):
+        for bad in ("fe80::1%-oProxyCommand=touch_x", "fe80::1%a b", "::1%eth0", "fe80::1%"):
+            self.assertFalse(inv.valid_ip(bad), bad)
+            self.assertFalse(inv.valid_host(bad), bad)
+        mode = {"name": "SSH", "copy_field": "ssh ubuntu@fe80::1%-oProxyCommand=x -p 30424"}
+        r = self.build(evil_api(modes=[mode], fixed_ip="fe80::2%-oProxyCommand=y"))
+        root = r["hosts"]["rstudio"]
+        self.assertEqual((root["ansible_host"], root["simplevm_fixed_ip"]), ("192.168.1.10", "192.168.1.10"))
+        self.assertIn("rstudio", r["groups"]["simplevm_unreachable"])
 
 
 @unittest.skipUnless(shutil.which("ansible"), "ansible not installed")
