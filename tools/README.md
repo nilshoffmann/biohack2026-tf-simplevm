@@ -93,7 +93,7 @@ not the API key):
 
 ```bash
 tools/simplevm_api.py check --save responses/
-tools/simplevm_api.py get vms/ -i --raw
+tools/simplevm_api.py get vms/by-api-key/ -i --raw   # GET vms/ is forbidden (403) for API keys
 ```
 
 ## Tests

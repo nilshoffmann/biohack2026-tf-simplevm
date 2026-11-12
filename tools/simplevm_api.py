@@ -397,7 +397,7 @@ def project_id(args: argparse.Namespace, c: Client) -> int:
 
 
 def find_vms(c: Client, ref: str) -> list[dict]:
-    vms = c.list_all("vms/")
+    vms = c.list_all("vms/by-api-key/")
     exact = [v for v in vms if v.get("uuid") == ref or v.get("openstack_id") == ref]
     if exact:
         return exact
@@ -434,7 +434,7 @@ def cmd_images(args, c):
 
 
 def cmd_vms(args, c):
-    data = c.list_all("vms/")
+    data = c.list_all("vms/by-api-key/")
     if not args.all_states:
         data = [v for v in data if v.get("vm_state") not in VM_GONE_STATES]
     if args.name:
@@ -560,7 +560,7 @@ def cmd_check(args, c):
     run(f"projects/{pid}/flavors/", listing(f"projects/{pid}/flavors/", FLAVOR, "flavor"))
     run(f"projects/{pid}/images/", listing(f"projects/{pid}/images/", IMAGE, "image"))
     run(f"projects/{pid}/snapshots/images/", listing(f"projects/{pid}/snapshots/images/", IMAGE, "image"))
-    run("vms/", listing("vms/", VM, "vm"))
+    run("vms/by-api-key/", listing("vms/by-api-key/", VM, "vm"))
     run("volumes/by-api-key/", listing("volumes/by-api-key/", VOLUME, "volume"))
 
     if args.json:

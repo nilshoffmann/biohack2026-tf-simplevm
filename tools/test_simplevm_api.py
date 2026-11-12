@@ -167,7 +167,7 @@ class HTTPTest(unittest.TestCase):
     def test_resenv_command_reports_problem(self):
         bad = {**GOOD_VM, "task_state": "building_playbook", "playbook": [{"id": "3", "done": False}]}
         Handler.routes = {
-            "/portal/api/vms/": (200, [bad], {}),
+            "/portal/api/vms/by-api-key/": (200, [bad], {}),
             "/portal/api/projects/7/images/": (200, [{"name": "RStudio", "resenv_template_name": "rstudio"}], {}),
             "/portal/api/projects/7/snapshots/images/": (200, [], {}),
         }
@@ -184,7 +184,7 @@ class HTTPTest(unittest.TestCase):
             "/portal/api/projects/7/flavors/": (200, [{"name": "f", "ram": "8GB"}], {}),
             "/portal/api/projects/7/images/": (200, [], {}),
             "/portal/api/projects/7/snapshots/images/": (403, {"detail": "scope"}, {}),
-            "/portal/api/vms/": (200, [GOOD_VM], {}),
+            "/portal/api/vms/by-api-key/": (200, [GOOD_VM], {}),
             "/portal/api/volumes/by-api-key/": (200, [], {}),
         }
         code, out, err = self.run_cli("check")
