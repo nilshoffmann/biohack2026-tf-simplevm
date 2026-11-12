@@ -30,6 +30,7 @@ cp terraform.tfvars.example terraform.tfvars   # optional: adjust name, flavor, 
 make plan
 make apply                          # waits until the research environment playbook has finished
 make output                         # research_environment_url, fixed_ip, ...
+make inventory                      # Ansible inventory (inventory.yml) with SSH gateway/port per VM
 make destroy                        # deletes the VM and its volume
 ```
 
@@ -99,3 +100,5 @@ output "images" { value = data.simplevm_images.all.images }
 | `variables.tf`, `outputs.tf` | Inputs and outputs |
 | `terraform.tfvars.example`, `.envrc.example` | Templates for local settings and credentials |
 | `scripts/build-provider.sh` | Builds the provider and writes `.provider/dev.tfrc` |
+| `tools/tf_inventory.py` | Ansible inventory from the Terraform state, see [tools/README.md](tools/README.md) |
+| `tools/simplevm_api.py` | Read-only API client for debugging responses, see [tools/README.md](tools/README.md) |

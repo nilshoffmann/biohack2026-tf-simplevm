@@ -96,8 +96,73 @@ tools/simplevm_api.py check --save responses/
 tools/simplevm_api.py get vms/ -i --raw
 ```
 
+## tf_inventory.py: Ansible inventory from the Terraform state
+
+Writes an Ansible inventory for every `simplevm_vm` in the Terraform state, at
+any module depth and with `count`/`for_each`. The **topology** comes from the
+state: Terraform address, research environment template and attached volumes.
+**How to reach a VM** comes from the SimpleVM API, because the provider does not
+store it. SimpleVM VMs are reached through an SSH gateway on a per-VM port,
+which the API reports as the VM's "SSH" access mode
+(`ssh -i … ubuntu@129.70.51.6 -p 30424`). The API is only read, never changed.
+
+```bash
+source .envrc                                   # SIMPLEVM_API_KEY of the project
+make inventory INVENTORY_ARGS="--ssh-key ~/.ssh/id_ed25519"   # -> inventory.yml (git-ignored)
+ansible -i inventory.yml simplevm -m ping
+```
+
+Or use it directly as a dynamic inventory script, so Ansible always sees the
+current state:
+
+```bash
+SIMPLEVM_INVENTORY_SSH_KEY=~/.ssh/id_ed25519 ansible-inventory -i tools/tf_inventory.py --graph
+```
+
+Generated for each host (the name is the VM's `name` in Terraform; SimpleVM's
+own name, which has a random suffix, is in `simplevm_name`):
+
+```yaml
+"biohack-rstudio":
+  ansible_host: "129.70.51.6"           # SSH gateway
+  ansible_port: 30424
+  ansible_user: "ubuntu"
+  simplevm_uuid: "91545ad4-…"
+  simplevm_name: "biohack-rstudio-faaef"
+  simplevm_tf_address: "simplevm_vm.this"
+  simplevm_fixed_ip: "192.168.1.168"     # internal address
+  simplevm_research_environment: { template: "rstudio", url: "https://…" }
+  simplevm_volumes: [ { name: "…-data", device: "/dev/vdb", size_gb: 100, id: "…" } ]
+```
+
+Groups: `simplevm` (all VMs), `resenv_<template>` (for example `resenv_rstudio`),
+`tf_module_<name>` for VMs created in a module, and `simplevm_unreachable` for
+VMs the API reports no SSH access for (for example stopped ones; they keep
+their internal IP). `--group-prefix lab_` prefixes all group names.
+
+| Option | Environment (dynamic mode) | Effect |
+|--------|----------------------------|--------|
+| `--state FILE` / `-` | `SIMPLEVM_INVENTORY_STATE` | Read a state file or stdin instead of running `terraform state pull`. |
+| `--chdir DIR` | `SIMPLEVM_INVENTORY_TF_DIR` | Directory for `terraform state pull` (`TF=tofu` for OpenTofu). |
+| `--ssh-key PATH` | `SIMPLEVM_INVENTORY_SSH_KEY` | Sets `ansible_ssh_private_key_file`. |
+| `--user NAME` | `SIMPLEVM_INVENTORY_USER` | Overrides `ansible_user`. |
+| `--offline` | `SIMPLEVM_INVENTORY_OFFLINE=1` | No API call; `ansible_host` is the internal `fixed_ip`, reachable only from inside the de.NBI Cloud network (for example from another VM of the project). |
+| `--skip-tainted` | | Leave out VMs that the next apply replaces. |
+| `--key-env VAR` | | Variable holding the API key (default `SIMPLEVM_API_KEY`). |
+
+Warnings (tainted VMs, VMs missing from the API, VMs without SSH access) go to
+stderr and into the header of the written file. In dynamic inventory mode they
+are put into the `simplevm_inventory_warnings` variable instead, because
+Ansible shows a script's stderr as errors. Set `SIMPLEVM_INVENTORY_VERBOSE=1`
+to print them anyway.
+
+Regenerate the inventory after every apply that replaces a VM: the gateway
+port changes with the VM.
+
 ## Tests
 
 ```bash
-python3 -m unittest discover -s tools
+python3 -m unittest discover -s tools    # or: make test-tools
 ```
+
+The Ansible parsing test runs only when `ansible-inventory` is on `PATH`.

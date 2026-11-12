@@ -18,6 +18,9 @@ override.tf.json
 # Locally built provider and its CLI config
 .provider/
 
+# Generated Ansible inventory (regenerate with `make inventory`)
+inventory.yml
+
 # Credentials
 .envrc
 .env
