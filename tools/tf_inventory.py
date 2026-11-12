@@ -29,6 +29,7 @@ Environment (also used in dynamic inventory mode, where Ansible passes no option
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import os
 import re
@@ -178,15 +179,77 @@ def parse_ssh_command(cmd: str) -> SSHAccess | None:
     return SSHAccess(user, host, port)
 
 
-def ssh_access(vm: dict) -> SSHAccess | None:
+# Values from the API (and the state, which the provider fills from the API)
+# are untrusted: VM names, paths and URLs are chosen by project members. They
+# must not be able to inject ssh options or Ansible templates.
+_HOSTNAME = re.compile(r"(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+                       r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*")
+_USERNAME = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]{0,31}")
+_JINJA = re.compile(r"\{[{%#]")
+
+
+def valid_ip(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        ipaddress.ip_address(value)
+        return True
+    except ValueError:
+        return False
+
+
+def valid_host(value: Any) -> bool:
+    """An IP address or DNS hostname; never something ssh could read as an option."""
+    return isinstance(value, str) and (valid_ip(value) or _HOSTNAME.fullmatch(value) is not None)
+
+
+def valid_user(value: Any) -> bool:
+    return isinstance(value, str) and _USERNAME.fullmatch(value) is not None
+
+
+def defuse(text: str) -> str:
+    """Break Jinja delimiters in text that is only informational (warnings)."""
+    return _JINJA.sub(lambda m: m.group(0)[0] + " " + m.group(0)[1], text)
+
+
+def drop_templates(value: Any, path: str, warnings: list[str]) -> Any:
+    """Remove strings that Ansible would evaluate as templates; returns the cleaned value."""
+    if isinstance(value, str):
+        if _JINJA.search(value):
+            warnings.append(f"{path}: value contains a Jinja delimiter and was left out "
+                            "(Ansible would evaluate it as a template)")
+            return None
+        return value
+    if isinstance(value, dict):
+        out = {k: drop_templates(v, f"{path}.{k}", warnings) for k, v in value.items()}
+        return {k: v for k, v in out.items() if v is not None}
+    if isinstance(value, list):
+        return [v for v in (drop_templates(v, f"{path}[{i}]", warnings) for i, v in enumerate(value)) if v is not None]
+    return value
+
+
+def ssh_access(vm: dict) -> tuple[SSHAccess | None, str | None]:
+    """The VM's SSH access from its API modes, and a reason if it was rejected."""
+    rejected = None
     for mode in vm.get("modes") or []:
         if not isinstance(mode, dict):
             continue
-        if (mode.get("name") or "").upper() == "SSH" or (mode.get("copy_field") or "").startswith("ssh "):
-            parsed = parse_ssh_command(mode.get("copy_field") or "")
-            if parsed:
-                return parsed
-    return None
+        cmd = mode.get("copy_field") or ""
+        if not isinstance(cmd, str):
+            continue
+        if (mode.get("name") or "").upper() == "SSH" or cmd.startswith("ssh "):
+            parsed = parse_ssh_command(cmd)
+            if not parsed:
+                continue
+            if not valid_host(parsed.host):
+                rejected = f"SSH host {parsed.host!r} is not a valid hostname or IP address"
+            elif parsed.user is not None and not valid_user(parsed.user):
+                rejected = f"SSH user {parsed.user!r} is not a valid user name"
+            elif parsed.port is not None and not 1 <= parsed.port <= 65535:
+                rejected = f"SSH port {parsed.port} is out of range"
+            else:
+                return parsed, None
+    return None, rejected
 
 
 def fetch_api_vms(client: api.Client) -> dict[str, dict]:
@@ -243,13 +306,13 @@ def build_inventory(state_vms: list[StateVM], api_vms: dict[str, dict] | None, o
         reachable = True
         if opts.offline:
             ip = vm.attrs.get("fixed_ip")
-            if not ip:
-                warnings.append(f"{vm.address} has no fixed_ip in the state; skipped")
+            if not valid_ip(ip):
+                warnings.append(f"{vm.address} has no valid fixed_ip in the state ({ip!r}); skipped")
                 continue
             hv["ansible_host"] = ip
             hv["ansible_user"] = opts.user or "ubuntu"
         else:
-            access = ssh_access(live)
+            access, rejected = ssh_access(live)
             if access:
                 hv["ansible_host"] = access.host
                 if access.port:
@@ -257,35 +320,53 @@ def build_inventory(state_vms: list[StateVM], api_vms: dict[str, dict] | None, o
                 hv["ansible_user"] = opts.user or access.user or "ubuntu"
             else:
                 reachable = False
-                state = live.get("vm_state")
-                warnings.append(f"{vm.address} reports no SSH access (vm_state={state!r}); "
-                                f"listed in group {p}simplevm_unreachable with its internal IP")
-                hv["ansible_host"] = live.get("fixed_ip") or vm.attrs.get("fixed_ip")
+                ip = next((c for c in (live.get("fixed_ip"), vm.attrs.get("fixed_ip")) if valid_ip(c)), None)
+                why = rejected or f"reports no SSH access (vm_state={live.get('vm_state')!r})"
+                if ip is None:
+                    warnings.append(f"{vm.address}: {why}, and has no valid internal IP; skipped")
+                    continue
+                warnings.append(f"{vm.address}: {why}; listed in group {p}simplevm_unreachable with its internal IP")
+                hv["ansible_host"] = ip
                 hv["ansible_user"] = opts.user or "ubuntu"
         if opts.ssh_key:
             hv["ansible_ssh_private_key_file"] = opts.ssh_key
 
         src = live or {}
         flavor = src.get("flavor") if isinstance(src.get("flavor"), dict) else {}
+
+        def pick(var: str, *candidates: Any) -> Any:
+            """First non-empty candidate (API before state) that Ansible would not template."""
+            for c in candidates:
+                if c in (None, ""):
+                    continue
+                if isinstance(c, str) and _JINJA.search(c):
+                    warnings.append(f"{vm.address}: {var} value contains a Jinja delimiter and was ignored "
+                                    "(Ansible would evaluate it as a template)")
+                    continue
+                return c
+            return None
+
         hv.update({k: v for k, v in {
             "simplevm_uuid": vm.uuid,
             # full_name: the name SimpleVM reports (with its suffix), provider >= 3bea398
-            "simplevm_name": src.get("name") or vm.attrs.get("full_name") or vm.attrs.get("name"),
+            "simplevm_name": pick("simplevm_name", src.get("name"), vm.attrs.get("full_name"), vm.attrs.get("name")),
             "simplevm_tf_address": vm.address,
-            "simplevm_project_id": src.get("project") or vm.attrs.get("project_id"),
-            "simplevm_fixed_ip": src.get("fixed_ip") or vm.attrs.get("fixed_ip"),
-            "simplevm_flavor": (flavor or {}).get("name") or vm.attrs.get("flavor"),
-            "simplevm_image": src.get("image_name") or vm.attrs.get("image"),
-            "simplevm_vm_state": src.get("vm_state") or vm.attrs.get("vm_state"),
+            "simplevm_project_id": pick("simplevm_project_id", src.get("project"), vm.attrs.get("project_id")),
+            "simplevm_fixed_ip": next((c for c in (src.get("fixed_ip"), vm.attrs.get("fixed_ip")) if valid_ip(c)), None),
+            "simplevm_flavor": pick("simplevm_flavor", (flavor or {}).get("name"), vm.attrs.get("flavor")),
+            "simplevm_image": pick("simplevm_image", src.get("image_name"), vm.attrs.get("image")),
+            "simplevm_vm_state": pick("simplevm_vm_state", src.get("vm_state"), vm.attrs.get("vm_state")),
             "simplevm_research_environment": None if not resenv else {
                 "template": resenv.get("template"),
-                "url": src.get("research_environment_url") or vm.attrs.get("research_environment_url") or None,
+                "url": pick("research_environment.url", src.get("research_environment_url"),
+                            vm.attrs.get("research_environment_url")),
             },
             "simplevm_volumes": vm.volumes or None,
             "simplevm_tainted": True if vm.tainted else None,
         }.items() if v not in (None, "")})
         if hv.get("simplevm_research_environment"):
             hv["simplevm_research_environment"] = {k: v for k, v in hv["simplevm_research_environment"].items() if v}
+        hv = drop_templates(hv, vm.address, warnings)
 
         if hostname in hosts:
             hostname = host_name(f"{hostname}_{vm.uuid[:8]}")
@@ -298,7 +379,7 @@ def build_inventory(state_vms: list[StateVM], api_vms: dict[str, dict] | None, o
             groups.setdefault(group_name(f"{p}tf_{module}"), []).append(hostname)
         if not reachable:
             groups.setdefault(f"{p}simplevm_unreachable", []).append(hostname)
-    return {"hosts": hosts, "groups": groups, "warnings": warnings}
+    return {"hosts": hosts, "groups": groups, "warnings": [defuse(w) for w in warnings]}
 
 
 def to_yaml_inventory(inv: dict, header: str = "") -> str:
