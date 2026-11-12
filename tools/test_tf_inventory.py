@@ -128,6 +128,130 @@ class BuildTest(unittest.TestCase):
         self.assertIn("hosts: {}", inv.to_yaml_inventory({"hosts": {}, "groups": {}, "warnings": []}))
 
 
+EVIL = "{{ lookup('pipe', 'touch /tmp/pwned') }}"
+
+
+def evil_api(**changes):
+    api = json.loads(json.dumps(API))
+    api["u-root"].update(changes)
+    return api
+
+
+class UntrustedInputTest(unittest.TestCase):
+    """API values come from project members and must not reach ssh or Jinja."""
+
+    def build(self, api, **opts):
+        return inv.build_inventory(inv.vms_from_state(STATE), api, inv.Options(**opts))
+
+    def all_strings(self, obj):
+        if isinstance(obj, str):
+            yield obj
+        elif isinstance(obj, dict):
+            for k, v in obj.items():
+                yield k
+                yield from self.all_strings(v)
+        elif isinstance(obj, list):
+            for v in obj:
+                yield from self.all_strings(v)
+
+    def assert_no_templates(self, r):
+        for s in self.all_strings({"hosts": r["hosts"], "groups": r["groups"], "warnings": r["warnings"]}):
+            self.assertIsNone(inv._JINJA.search(s), s)
+
+    def test_templates_in_api_values_are_dropped(self):
+        r = self.build(evil_api(name=EVIL, research_environment_url=EVIL, image_name="{% raw %}x", vm_state=EVIL))
+        self.assert_no_templates(r)
+        root = r["hosts"]["rstudio"]
+        self.assertEqual(root["simplevm_name"], "rstudio")  # falls back to the configured name
+        self.assertNotIn("url", root["simplevm_research_environment"])
+        self.assertEqual(root["ansible_host"], "129.70.51.6")
+        self.assertTrue(any("Jinja delimiter" in w for w in r["warnings"]))
+
+    def test_templates_in_state_values_are_dropped(self):
+        state = json.loads(json.dumps(STATE))
+        state["resources"][1]["instances"][0]["attributes"]["research_environment"]["template"] = "{# x #}"
+        r = inv.build_inventory(inv.vms_from_state(state), API, inv.Options())
+        self.assert_no_templates(r)
+
+    def test_ssh_option_injection_in_host_is_rejected(self):
+        mode = {"name": "SSH", "copy_field": "ssh ubuntu@-oProxyCommand=touch_pwned -p 30424"}
+        r = self.build(evil_api(modes=[mode]))
+        root = r["hosts"]["rstudio"]
+        self.assertEqual(root["ansible_host"], "192.168.1.10")  # internal IP fallback
+        self.assertIn("rstudio", r["groups"]["simplevm_unreachable"])
+        self.assertTrue(any("not a valid hostname" in w for w in r["warnings"]))
+
+    def test_bad_user_and_port_are_rejected(self):
+        for cmd in ("ssh 'a;b'@gw.example -p 22", "ssh ubuntu@gw.example -p 70000", "ssh ubuntu@gw example"):
+            access, reason = inv.ssh_access({"modes": [{"name": "SSH", "copy_field": cmd}]})
+            if access is not None:  # "gw example": host is "gw", which is a valid name
+                self.assertEqual(access.host, "gw")
+            else:
+                self.assertIsNotNone(reason, cmd)
+
+    def test_invalid_api_fixed_ip_falls_back_to_state(self):
+        mode = {"name": "SSH", "copy_field": "ssh ubuntu@-oX=1"}
+        r = self.build(evil_api(modes=[mode], fixed_ip="-oProxyCommand=x"))
+        self.assertEqual(r["hosts"]["rstudio"]["ansible_host"], "192.168.1.10")
+        # playbooks may use simplevm_fixed_ip as an address too
+        self.assertEqual(r["hosts"]["rstudio"]["simplevm_fixed_ip"], "192.168.1.10")
+
+    def test_invalid_fixed_ip_everywhere_skips_host(self):
+        state = json.loads(json.dumps(STATE))
+        state["resources"][1]["instances"][0]["attributes"]["fixed_ip"] = "-oProxyCommand=x"
+        api = evil_api(modes=[], fixed_ip="")
+        r = inv.build_inventory(inv.vms_from_state(state), api, inv.Options())
+        self.assertNotIn("rstudio", r["hosts"])
+        r = inv.build_inventory(inv.vms_from_state(state), None, inv.Options(offline=True))
+        self.assertNotIn("rstudio", r["hosts"])
+
+    def test_validators(self):
+        for ok in ("129.70.51.6", "::1", "gw.example", "simplevm-gw01.bi.denbi.de"):
+            self.assertTrue(inv.valid_host(ok), ok)
+        for bad in ("-oProxyCommand=x", "gw example", "", "a..b", "gw.example;id", "[::1]", None):
+            self.assertFalse(inv.valid_host(bad), bad)
+        self.assertTrue(inv.valid_user("ubuntu"))
+        for bad in ("-l", "a b", "a;b", "", "x" * 40):
+            self.assertFalse(inv.valid_user(bad), bad)
+
+    def test_defuse(self):
+        self.assertEqual(inv.defuse("a {{ b }} {% c %} {# d #}"), "a { {  b }} { % c %} { # d #}")
+        for s in ("{{{ x }}", "{{% x %}", "{{# x #}", "{%{ x", "{{{{{{", "{" * 7 + "%#"):
+            self.assertIsNone(inv._JINJA.search(inv.defuse(s)), s)
+
+    def test_nested_delimiters_in_warnings_are_defused(self):
+        mode = {"name": "SSH", "copy_field": "ssh ubuntu@gw.example -p 70000"}
+        r = self.build(evil_api(modes=[mode], vm_state="{{{ lookup('pipe', 'id') }}"))
+        self.assertTrue(any("vm_state" in w for w in r["warnings"]))
+        self.assert_no_templates(r)
+
+    def test_ipv6_scope_ids_are_rejected(self):
+        for bad in ("fe80::1%-oProxyCommand=touch_x", "fe80::1%a b", "::1%eth0", "fe80::1%"):
+            self.assertFalse(inv.valid_ip(bad), bad)
+            self.assertFalse(inv.valid_host(bad), bad)
+        mode = {"name": "SSH", "copy_field": "ssh ubuntu@fe80::1%-oProxyCommand=x -p 30424"}
+        r = self.build(evil_api(modes=[mode], fixed_ip="fe80::2%-oProxyCommand=y"))
+        root = r["hosts"]["rstudio"]
+        self.assertEqual((root["ansible_host"], root["simplevm_fixed_ip"]), ("192.168.1.10", "192.168.1.10"))
+        self.assertIn("rstudio", r["groups"]["simplevm_unreachable"])
+
+
+@unittest.skipUnless(shutil.which("ansible"), "ansible not installed")
+class AnsibleDoesNotEvaluateTest(unittest.TestCase):
+    def test_hostile_values_are_not_templated(self):
+        tmpl = "{{ 'tmpl' ~ 'evaluated' }}"
+        r = inv.build_inventory(inv.vms_from_state(STATE), evil_api(name=tmpl, research_environment_url=tmpl),
+                                inv.Options())
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "hosts.yml")
+            with open(path, "w") as f:
+                f.write(inv.to_yaml_inventory(r, "\n".join(r["warnings"])))
+            out = subprocess.run(["ansible", "-i", path, "rstudio", "-m", "debug", "-a", "var=hostvars[inventory_hostname]"],
+                                 capture_output=True, text=True, check=True, env={**os.environ, "ANSIBLE_NOCOLOR": "1"})
+        self.assertNotIn("tmplevaluated", out.stdout)
+        self.assertIn('"simplevm_name": "rstudio"', out.stdout)
+
+
 class StateTest(unittest.TestCase):
     def test_rejects_old_format(self):
         with tempfile.NamedTemporaryFile("w", suffix=".tfstate", delete=False) as f:

@@ -159,6 +159,19 @@ to print them anyway.
 Regenerate the inventory after every apply that replaces a VM: the gateway
 port changes with the VM.
 
+API values are treated as untrusted, because VM names, paths and URLs are chosen
+by project members:
+- **SSH settings:** `ansible_host` must be an IP address or DNS hostname, so
+  nothing `ssh` could read as an option, such as `-oProxyCommand=…`. The user
+  must be a valid POSIX name and the port must be 1–65535. An SSH mode that
+  fails these checks is ignored.
+- **Internal IP fallback:** the internal IP used instead of a rejected SSH mode
+  must be a valid IP address.
+- **Template values:** any value containing `{{`, `{%` or `{#` is left out with
+  a warning. Ansible evaluates such strings as Jinja templates in YAML and
+  dynamic inventories alike, which could run code on the control node through
+  `lookup('pipe', …)`.
+
 ## Tests
 
 ```bash
