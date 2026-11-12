@@ -1,0 +1,29 @@
+# Terraform / OpenTofu working files
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+*.tfplan
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Variable files can hold project specifics; commit only the example
+*.tfvars
+*.tfvars.json
+!terraform.tfvars.example
+
+# Locally built provider and its CLI config
+.provider/
+
+# Credentials
+.envrc
+.env
+
+# Python
+__pycache__/
+
+# Editor swap files
+*.swp

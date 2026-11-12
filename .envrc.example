@@ -1,0 +1,5 @@
+# Copy to .envrc (git-ignored) and `source .envrc`, or use direnv.
+# Create the key in the SimpleVM portal: project -> API Key tab.
+# Scopes: project:read, vm:read, VM change scopes, volume scopes, volume:change_state.
+export SIMPLEVM_API_KEY="paste-your-key-here"
+export SIMPLEVM_PROJECT_ID="1234"

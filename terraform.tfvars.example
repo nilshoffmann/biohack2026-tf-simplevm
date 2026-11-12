@@ -1,0 +1,16 @@
+# Copy to terraform.tfvars and adjust. terraform.tfvars is git-ignored.
+
+# project_id = 1234            # or export SIMPLEVM_PROJECT_ID
+
+vm_name = "biohack-rstudio"
+flavor  = "de.NBI default"
+
+# Image with a research environment; the template is taken from the image.
+image = "RStudio-Ubuntu-22.04"
+# research_environment_template = "rstudio"
+
+# Optional data volume in GiB (format and mount it once inside the VM)
+# volume_size_gb = 100
+
+# power_state    = "active"     # "stopped" to pause the VM without deleting it
+# create_timeout = "60m"
