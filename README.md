@@ -100,5 +100,6 @@ output "images" { value = data.simplevm_images.all.images }
 | `variables.tf`, `outputs.tf` | Inputs and outputs |
 | `terraform.tfvars.example`, `.envrc.example` | Templates for local settings and credentials |
 | `scripts/build-provider.sh` | Builds the provider and writes `.provider/dev.tfrc` |
+| `examples/two-vms/main.tf` | Standalone example: VS Code and Guacamole VNC VMs, each with an attached volume (`make plan TF="terraform -chdir=examples/two-vms"`) |
 | `tools/tf_inventory.py` | Ansible inventory from the Terraform state, see [tools/README.md](tools/README.md) |
 | `tools/simplevm_api.py` | Read-only API client for debugging responses, see [tools/README.md](tools/README.md) |
